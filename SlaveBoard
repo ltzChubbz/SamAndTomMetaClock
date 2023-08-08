@@ -1,0 +1,237 @@
+#include <esp_now.h>
+#include <WiFi.h>
+#include <Stepper.h>
+
+////////////////////
+#define SlaveNumber 7 //Left to right slave number 1-8
+////////////////////
+
+
+#define CHANNEL 1
+
+int incData;
+int incDataHour;
+int incDataMinute;
+int currDataMinute;
+int relevantNumber;
+
+const int stepsPerRevolution = 180;
+const int stepperSpeed = 200;
+
+Stepper stepperU3T(stepsPerRevolution, 21, 33, 34, 35);//Pin 21 is hardwired for 26. 26 cannot be used, it is PSRAM
+Stepper stepperU3B(stepsPerRevolution, 38, 39, 36, 37);
+
+Stepper stepperU2T(stepsPerRevolution, 8, 9, 10, 11);
+Stepper stepperU2B(stepsPerRevolution, 14, 15, 12, 13);
+
+Stepper stepperU1T(stepsPerRevolution, 0, 1, 2, 3);
+Stepper stepperU1B(stepsPerRevolution, 6, 7, 4, 5);
+
+
+int stepperU3LocL[10] = {0, 3, 5, 5, 4, 0, 0, 5, 0, 0};
+int stepperU3LocR[10] = {2, 4, 2, 2, 4, 9, 9, 2, 2, 2};
+int stepperU2LocL[10] = {1, 3, 0, 5, 8, 8, 1, 3, 8, 8}; 
+int stepperU2LocR[10] = {1, 1, 7, 7, 1, 2, 2, 1, 7, 1}; 
+int stepperU1LocL[10] = {8, 3, 8, 5, 3, 5, 8, 3, 8, 5}; 
+int stepperU1LocR[10] = {7, 6, 9, 7, 6, 7, 7, 6, 7, 7}; 
+
+//////////////////////   0  1  2  3  4  5  6  7  8  9   //////////////
+int timeLocCodesT[10] = {4, 2, 0, 1, 6, 4, 2, 0, 2, 0};  //multiply these by 90 for steps
+int timeLocCodesB[10] = {6, 6, 6, 1, 6, 4, 2, 2, 4, 0};
+
+int stepperU3Tpos, stepperU3Bpos, stepperU2Tpos, stepperU2Bpos, stepperU1Tpos, stepperU1Bpos; //Current position of steppers
+
+// Init ESP Now with fallback
+void InitESPNow() {
+  WiFi.disconnect();
+  if (esp_now_init() == ESP_OK) {
+    Serial.println("ESPNow Init Success");
+  }
+  else {
+    Serial.println("ESPNow Init Failed");
+    // Retry InitESPNow, add a counte and then restart?
+    // InitESPNow();
+    // or Simply Restart
+    ESP.restart();
+  }
+}
+
+// config AP SSID
+void configDeviceAP() {
+  String Prefix = "Face:";
+  String Mac = WiFi.macAddress();
+  String SSID = Prefix + Mac;
+  String Password = "123456789";
+  bool result = WiFi.softAP(SSID.c_str(), Password.c_str(), CHANNEL, 0);
+  if (!result) {
+    Serial.println("AP Config failed.");
+  } else {
+    Serial.println("AP Config Success. Broadcasting with AP: " + String(SSID));
+  }
+}
+
+void setup() {
+  Serial.begin(115200);
+  Serial.println("ESPNow/Basic/Slave Example");
+  //Set device in AP mode to begin with
+  WiFi.mode(WIFI_AP);
+  // configure device AP mode
+  configDeviceAP();
+  // This is the mac address of the Slave in AP Mode
+  Serial.print("AP MAC: "); Serial.println(WiFi.softAPmacAddress());
+  // Init ESPNow with a fallback logic
+  InitESPNow();
+  // Once ESPNow is successfully Init, we will register for recv CB to
+  // get recv packer info.
+  esp_now_register_recv_cb(OnDataRecv);
+
+
+  stepperU3T.setSpeed(stepperSpeed);
+  stepperU3B.setSpeed(stepperSpeed);
+  stepperU2T.setSpeed(stepperSpeed);
+  stepperU2B.setSpeed(stepperSpeed);
+  stepperU1T.setSpeed(stepperSpeed);
+  stepperU1B.setSpeed(stepperSpeed);
+  stepperU3T.step(-700);
+  stepperU3B.step(-700);
+  stepperU2T.step(-700);
+  stepperU2B.step(-700);
+  stepperU1T.step(-700);
+  stepperU1B.step(-700);
+
+  stepperU3Tpos = 0;
+  stepperU3Bpos = 0; 
+  stepperU2Tpos = 0; 
+  stepperU2Bpos = 0;
+  stepperU1Tpos = 0; 
+  stepperU1Bpos = 0;
+
+}
+
+// callback when data is recv from Master
+void OnDataRecv(const uint8_t *mac_addr, const uint32_t *data, int data_len) {
+  char macStr[18];
+  snprintf(macStr, sizeof(macStr), "%02x:%02x:%02x:%02x:%02x:%02x",
+           mac_addr[0], mac_addr[1], mac_addr[2], mac_addr[3], mac_addr[4], mac_addr[5]);
+  Serial.print("Last Packet Recv from: "); Serial.println(macStr);
+  Serial.print("Last Packet Recv Data: "); Serial.println(*data);
+  incData = *data;
+  incDataHour = floor((incData - 9990000) / 100);
+  incDataMinute = floor(incData - 9990000 - (incDataHour * 100));
+  Serial.print("Received Time:   ");
+  Serial.print(incDataHour);Serial.print(":");Serial.print(incDataMinute);
+
+  //Check which digit concerns this board
+  if (SlaveNumber == 1 || SlaveNumber == 2 || SlaveNumber == 3 || SlaveNumber == 4){
+    //we are looking at the hours
+    if (SlaveNumber == 1 || SlaveNumber == 2){
+      //we are looking at the first digit of hours
+     relevantNumber = floor(incDataHour / 10);
+    }
+    else{
+      //we are looking at the second digit of hours
+      relevantNumber = incDataHour - (floor(incDataHour / 10) * 10);
+    }
+  }
+  else{
+    //we are looking at the minutes
+    if (SlaveNumber == 5 || SlaveNumber == 6){
+      //we are looking at the first digit of minutes
+     relevantNumber = floor(incDataMinute / 10);
+    }
+    else{
+      //we are looking at the second digit of minutes
+      relevantNumber = incDataMinute - (floor(incDataMinute / 10) * 10);
+    }
+  }
+  Serial.println("");
+  Serial.println(relevantNumber);
+  Serial.println("");
+}
+
+void loop() {
+  if(incDataMinute != currDataMinute){
+    
+    Serial.println("");
+    Serial.println("/////////////////////////////////////////////////////////");
+    Serial.println("CHANGING MY HANDS TO THE NEW MINUTE BEEP BOOP WIRRRRRRR");
+    Serial.println("/////////////////////////////////////////////////////////");
+    Serial.println("");
+
+    throwHands();
+
+    currDataMinute = incDataMinute;
+  }
+}
+
+void throwHands() {
+
+  if (SlaveNumber == 1 || SlaveNumber == 3 || SlaveNumber == 5 || SlaveNumber == 7){
+    //we are looking at left hand sides of digit
+ 
+    stepperU3T.step((90 * timeLocCodesT[stepperU3LocL[relevantNumber]]) - (stepperU3Tpos));
+    stepperU3Tpos = (90 * timeLocCodesT[stepperU3LocL[relevantNumber]]);
+    Serial.println("stepperU3Tpos");
+    Serial.println(stepperU3Tpos);
+
+    stepperU3B.step((90 * timeLocCodesB[stepperU3LocL[relevantNumber]]) - (stepperU3Bpos));
+    stepperU3Bpos = (90 * timeLocCodesB[stepperU3LocL[relevantNumber]]);
+    Serial.println("stepperU3Bpos");
+    Serial.println(stepperU3Bpos);
+   
+    stepperU2T.step((90 * timeLocCodesT[stepperU2LocL[relevantNumber]]) - (stepperU2Tpos));
+    stepperU2Tpos = (90 * timeLocCodesT[stepperU2LocL[relevantNumber]]);
+    Serial.println("stepperU2Tpos");
+    Serial.println(stepperU2Tpos);
+   
+    stepperU2B.step((90 * timeLocCodesB[stepperU2LocL[relevantNumber]]) - (stepperU2Bpos));
+    stepperU2Bpos = (90 * timeLocCodesB[stepperU2LocL[relevantNumber]]);
+    Serial.println("stepperU2Bpos");
+    Serial.println(stepperU2Bpos);
+    
+    stepperU1T.step((90 * timeLocCodesT[stepperU1LocL[relevantNumber]]) - (stepperU1Tpos));
+    stepperU1Tpos = (90 * timeLocCodesT[stepperU1LocL[relevantNumber]]);
+    Serial.println("stepperU1Tpos");
+    Serial.println(stepperU1Tpos);
+   
+    stepperU1B.step((90 * timeLocCodesB[stepperU1LocL[relevantNumber]]) - (stepperU1Bpos));
+    stepperU1Bpos = (90 * timeLocCodesB[stepperU1LocL[relevantNumber]]);
+    Serial.println("stepperU1Bpos");
+    Serial.println(stepperU1Bpos);
+
+  }
+  else{
+    //we must be looking at the right half of the digit
+    
+    stepperU3T.step((90 * timeLocCodesT[stepperU3LocR[relevantNumber]]) - (stepperU3Tpos));
+    stepperU3Tpos = (90 * timeLocCodesT[stepperU3LocR[relevantNumber]]);
+    Serial.println("stepperU3Tpos");
+    Serial.println(stepperU3Tpos);
+
+    stepperU3B.step((90 * timeLocCodesB[stepperU3LocR[relevantNumber]]) - (stepperU3Bpos));
+    stepperU3Bpos = (90 * timeLocCodesB[stepperU3LocR[relevantNumber]]);
+    Serial.println("stepperU3Bpos");
+    Serial.println(stepperU3Bpos);
+   
+    stepperU2T.step((90 * timeLocCodesT[stepperU2LocR[relevantNumber]]) - (stepperU2Tpos));
+    stepperU2Tpos = (90 * timeLocCodesT[stepperU2LocR[relevantNumber]]);
+    Serial.println("stepperU2Tpos");
+    Serial.println(stepperU2Tpos);
+   
+    stepperU2B.step((90 * timeLocCodesB[stepperU2LocR[relevantNumber]]) - (stepperU2Bpos));
+    stepperU2Bpos = (90 * timeLocCodesB[stepperU2LocR[relevantNumber]]);
+    Serial.println("stepperU2Bpos");
+    Serial.println(stepperU2Bpos);
+    
+    stepperU1T.step((90 * timeLocCodesT[stepperU1LocR[relevantNumber]]) - (stepperU1Tpos));
+    stepperU1Tpos = (90 * timeLocCodesT[stepperU1LocR[relevantNumber]]);
+    Serial.println("stepperU1Tpos");
+    Serial.println(stepperU1Tpos);
+   
+    stepperU1B.step((90 * timeLocCodesB[stepperU1LocR[relevantNumber]]) - (stepperU1Bpos));
+    stepperU1Bpos = (90 * timeLocCodesB[stepperU1LocR[relevantNumber]]);
+    Serial.println("stepperU1Bpos");
+    Serial.println(stepperU1Bpos);
+  }
+  return;
+}
